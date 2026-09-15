@@ -13,8 +13,12 @@ press Enter:
 npm start
 ```
 
-The default model is `openrouter/auto`, which lets OpenRouter choose a suitable
-model. Select a model yourself before starting, for example:
+After the key is accepted, Code Terminal fetches and displays the currently
+available free OpenRouter models. Select a numbered model, or press Enter to
+use `openrouter/free`, which automatically routes each request to a free model.
+Free models can have availability and rate limits, but the app will not select a
+paid model through this free router. Select a model yourself before starting,
+if needed:
 
 ```powershell
 $env:CODE_TERMINAL_MODEL = "anthropic/claude-sonnet-4"

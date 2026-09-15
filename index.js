@@ -21,7 +21,7 @@ const REQUEST_TIMEOUT_MS = 45_000;
 const requestedProvider = (process.env.CODE_TERMINAL_PROVIDER || "openrouter").toLowerCase();
 const providers = Object.freeze({
   openai: { name: "OPENAI", endpoint: "https://api.openai.com/v1/chat/completions", key: process.env.OPENAI_API_KEY, defaultModel: "gpt-4o-mini" },
-  openrouter: { name: "OPENROUTER", endpoint: "https://openrouter.ai/api/v1/chat/completions", key: process.env.OPENROUTER_API_KEY, defaultModel: "openrouter/auto" }
+  openrouter: { name: "OPENROUTER", endpoint: "https://openrouter.ai/api/v1/chat/completions", key: process.env.OPENROUTER_API_KEY, defaultModel: "openrouter/free" }
 });
 const provider = providers[requestedProvider] ? requestedProvider : "openrouter";
 const activeProvider = providers[provider];
@@ -53,6 +53,58 @@ function readClipboardText() {
   } catch {
     return "";
   }
+}
+
+async function chooseFreeOpenRouterModel() {
+  if (provider !== "openrouter" || !apiKey) return;
+  process.stdout.write(`\n${tag("FREE MODEL SELECTOR", "green")} ${paint("gray", "Loading currently available free models...")}\n`);
+  try {
+    const response = await fetch("https://openrouter.ai/api/v1/models", {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(15_000)
+    });
+    if (!response.ok) throw new Error("Catalog unavailable");
+    const data = await response.json();
+    const freeModels = (data.data || [])
+      .filter((item) => item.id?.endsWith(":free") || (Number(item.pricing?.prompt) === 0 && Number(item.pricing?.completion) === 0))
+      .map((item) => ({ id: item.id, name: item.name || item.id, context: item.context_length }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    if (!freeModels.length) throw new Error("No free models found");
+
+    console.log(`${paint("green", "  0.")} ${paint("cyan", "openrouter/free")} ${paint("gray", "— automatic free-model router (recommended)")}`);
+    freeModels.forEach((item, index) => {
+      const context = item.context ? ` · ${(item.context / 1000).toFixed(0)}k context` : "";
+      console.log(`${paint("green", `  ${index + 1}.`.padEnd(5))}${paint("white", item.name)}\n${paint("gray", `       ${item.id}${context}`)}`);
+    });
+
+    const selector = readline.createInterface({ input, output, terminal: true });
+    const selected = (await selector.question(`\n${paint("green", "  Select a free model [0]: ")}`)).trim();
+    selector.close();
+    if (!selected || selected === "0") model = "openrouter/free";
+    else if (/^\d+$/.test(selected) && freeModels[Number(selected) - 1]) model = freeModels[Number(selected) - 1].id;
+    else {
+      console.log(paint("yellow", "  Invalid choice — using the automatic free-model router."));
+      model = "openrouter/free";
+    }
+    console.log(`${tag("FREE MODEL ACTIVE", "green")} ${paint("cyan", model)}\n`);
+  } catch {
+    model = "openrouter/free";
+    console.log(paint("yellow", "  Free catalog unavailable — using OpenRouter's automatic free-model router.\n"));
+  }
+}
+
+function formatAnswer(answer) {
+  let inCodeBlock = false;
+  return answer.split("\n").map((text) => {
+    if (text.trimStart().startsWith("```")) {
+      inCodeBlock = !inCodeBlock;
+      return paint("magenta", `  ${inCodeBlock ? "╭─ CODE" : "╰─"}`);
+    }
+    if (inCodeBlock) return `${paint("green", "  │")} ${paint("white", text)}`;
+    if (/^#{1,6}\s+/.test(text)) return `\n${paint("cyan", `  ${text.replace(/^#+\s+/, "")}`)}`;
+    if (/^\s*[-*]\s+/.test(text)) return `${paint("blue", "  •")} ${text.replace(/^\s*[-*]\s+/, "")}`;
+    return text ? `${paint("gray", "  │")} ${text}` : "";
+  }).join("\n");
 }
 
 async function requestApiKeyAtStartup() {
@@ -163,8 +215,8 @@ async function askAI(question) {
     const answer = data.choices?.[0]?.message?.content?.trim();
     if (!answer) throw new Error("The AI returned an empty response.");
 
-    console.log(paint("cyan", "  \u2570\u2500\u2500\u2500 AI RESPONSE \u2500\u2500\u2500"));
-    console.log(answer.split("\n").map((text) => `${paint("gray", "  \u2502")} ${text}`).join("\n"));
+    console.log(paint("cyan", "  \u256d\u2500\u2500\u2500 AI RESPONSE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"));
+    console.log(formatAnswer(answer));
     console.log(`${paint("gray", "  \u2570")}${line("blue")}\n`);
     messages.push({ role: "user", content: question }, { role: "assistant", content: answer });
     messages = messages.slice(-(MAX_EXCHANGES * 2));
@@ -177,6 +229,7 @@ async function askAI(question) {
 
 async function run() {
   await requestApiKeyAtStartup();
+  await chooseFreeOpenRouterModel();
   banner();
   const rl = readline.createInterface({ input, output, terminal: true });
   rl.on("SIGINT", () => rl.close());
