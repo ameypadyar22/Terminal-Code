@@ -6,16 +6,10 @@ import { execFileSync, execFile } from "node:child_process";
 import { readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { getProviderConfiguration, IGNORED_DIRECTORIES, LIMITS, SYSTEM_PROMPT } from "./src/config.js";
+import { agentTools } from "./src/tools/schema.js";
+import { COLORS, line, paint, tag } from "./src/ui/terminal.js";
 
-const COLORS = {
-  reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", blue: "\x1b[34m",
-  magenta: "\x1b[35m", yellow: "\x1b[33m", white: "\x1b[37m", gray: "\x1b[90m",
-  dim: "\x1b[2m", bold: "\x1b[1m"
-};
-
-const paint = (color, value) => `${COLORS[color]}${value}${COLORS.reset}`;
-const line = (color = "blue") => paint(color, "\u2500".repeat(68));
-const tag = (label, color = "cyan") => paint(color, `${COLORS.bold}[ ${label} ]${COLORS.reset}`);
 function logo() {
   console.log(paint("cyan", `${COLORS.bold}   ██████╗ ██████╗ ██████╗ ███████╗    ████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗`));
   console.log(paint("cyan", `${COLORS.bold}  ██╔════╝██╔═══██╗██╔══██╗██╔════╝    ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║████╗  ██║██╔══██╗██║`));
@@ -25,24 +19,17 @@ function logo() {
   console.log(paint("cyan", `${COLORS.bold}   ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝       ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝`));
 }
 const workspaceRoot = path.resolve(process.cwd());
-const systemPrompt = "You are Code Terminal, a precise and helpful agentic assistant in a developer's command line. Decide whether a tool would make the answer more accurate or complete and use it when appropriate. Clearly explain outcomes. Use only the provided tools. File writes, Python execution, database mutations, and potentially destructive shell or Git commands require the user's confirmation; never imply an action occurred when it was declined or failed. Do not store secrets, credentials, financial data, health data, or other sensitive personal information in memory.";
-const MAX_PROMPT_LENGTH = 12_000;
-const MAX_EXCHANGES = 6;
-const REQUEST_TIMEOUT_MS = 45_000;
-const MAX_AGENT_STEPS = 8;
-const MAX_TOOL_RESULTS = 40;
-const MAX_FILE_BYTES = 100_000;
-const MAX_TOOL_OUTPUT = 12_000;
-const IGNORED_DIRECTORIES = new Set([".git", "node_modules", "dist", "build", "coverage"]);
+const systemPrompt = SYSTEM_PROMPT;
+const MAX_PROMPT_LENGTH = LIMITS.promptLength;
+const MAX_EXCHANGES = LIMITS.exchanges;
+const REQUEST_TIMEOUT_MS = LIMITS.requestTimeoutMs;
+const MAX_AGENT_STEPS = LIMITS.agentSteps;
+const MAX_TOOL_RESULTS = LIMITS.toolResults;
+const MAX_FILE_BYTES = LIMITS.fileBytes;
+const MAX_TOOL_OUTPUT = LIMITS.toolOutput;
 const execFileAsync = promisify(execFile);
 
-const requestedProvider = (process.env.CODE_TERMINAL_PROVIDER || "openrouter").toLowerCase();
-const providers = Object.freeze({
-  openai: { name: "OPENAI", endpoint: "https://api.openai.com/v1/chat/completions", key: process.env.OPENAI_API_KEY, defaultModel: "gpt-4o-mini" },
-  openrouter: { name: "OPENROUTER", endpoint: "https://openrouter.ai/api/v1/chat/completions", key: process.env.OPENROUTER_API_KEY, defaultModel: "openrouter/free" }
-});
-const provider = providers[requestedProvider] ? requestedProvider : "openrouter";
-const activeProvider = providers[provider];
+const { provider, activeProvider } = getProviderConfiguration();
 let model = process.env.CODE_TERMINAL_MODEL || activeProvider.defaultModel;
 let messages = [];
 let apiKey = activeProvider.key?.trim() || "";
@@ -58,26 +45,6 @@ const commandHints = Object.freeze({
   "/model <name>": "change the active model",
   "/exit": "close Code Terminal"
 });
-
-const tool = (name, description, properties = {}, required = []) => ({ type: "function", function: { name, description, parameters: { type: "object", properties, required, additionalProperties: false } } });
-const string = (description) => ({ type: "string", description });
-const agentTools = [
-  tool("calculate", "Safely evaluate a mathematical expression, including percentages such as 25% of 4500.", { expression: string("Math expression") }, ["expression"]),
-  tool("web_search", "Search the public web for current information.", { query: string("Search query") }, ["query"]),
-  tool("list_files", "List files and directories in a workspace directory.", { path: string("Relative directory; default '.'") }),
-  tool("search_files", "Search workspace text files for a literal string, optionally limited by file extension.", { query: string("Literal text"), extension: string("Optional extension, such as .py") }, ["query"]),
-  tool("read_file", "Read and summarize-ready content from TXT, JSON, CSV, Markdown, or PDF files in the workspace.", { path: string("Relative file path") }, ["path"]),
-  tool("write_file", "Create or replace a text-based file in the workspace, including required parent directories. Confirmation is requested once per request.", { path: string("Relative output path"), content: string("Complete file content") }, ["path", "content"]),
-  tool("run_python", "Run Python for calculation or data analysis. Always asks the user for confirmation and has a time limit.", { code: string("Python code") }, ["code"]),
-  tool("run_terminal", "Run a safe, allowlisted terminal command in the workspace. Destructive commands require confirmation.", { command: string("Command program"), args: { type: "array", items: { type: "string" }, description: "Command arguments" } }, ["command"]),
-  tool("sqlite_query", "Run SQLite SQL against a workspace .db file. Mutating SQL requires confirmation.", { database: string("Relative .db path"), sql: string("SQLite SQL"), params: { type: "array", items: {} } }, ["database", "sql"]),
-  tool("api_request", "Make a JSON HTTP GET or POST request to an API.", { url: string("http(s) URL"), method: string("GET or POST; default GET"), body: string("Optional JSON request body") }, ["url"]),
-  tool("memory", "Save, retrieve, list, or forget non-sensitive user preferences in local session memory.", { action: string("save, get, list, or forget"), key: string("Memory key"), value: string("Non-sensitive value") }, ["action"]),
-  tool("date_time", "Get the local date/time or calculate the number of days until an ISO date.", { target_date: string("Optional YYYY-MM-DD target date") }),
-  tool("json_tool", "Parse, validate, pretty-print, or modify JSON text.", { operation: string("validate, pretty, get, or set"), json: string("JSON text"), key: string("Property key for get or set"), value: string("JSON value for set") }, ["operation", "json"]),
-  tool("text_process", "Count words, extract lines containing a term, or transform text to upper/lower case.", { operation: string("word_count, extract, upper, or lower"), text: string("Text to process"), query: string("Term for extract") }, ["operation", "text"]),
-  tool("git", "Inspect repository status, branches, log, diff, or run a Git operation. Destructive operations require confirmation.", { args: { type: "array", items: { type: "string" }, description: "Git arguments" } }, ["args"])
-];
 
 function isSafeModelName(value) {
   return /^[a-zA-Z0-9._:/-]{1,160}$/.test(value);

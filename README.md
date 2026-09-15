@@ -9,6 +9,24 @@ Code Terminal is a terminal-based AI assistant for coding, debugging, and projec
 
 No package installation is currently required; the CLI uses Node.js built-in modules.
 
+## Project structure
+
+```text
+.
+├── index.js                 # Executable CLI entry point and session loop
+├── src/
+│   ├── config.js            # Limits, provider selection, and shared configuration
+│   ├── tools/
+│   │   └── schema.js        # Model tool definitions
+│   └── ui/
+│       └── terminal.js      # ANSI colors and terminal display helpers
+├── README.md
+├── SECURITY.md
+└── package.json
+```
+
+The entry point remains `index.js` so both `npm start` and the global `code-terminal` command continue to work. Add new provider settings in `src/config.js`, new model-callable tool schemas in `src/tools/schema.js`, and reusable terminal styling in `src/ui/terminal.js`.
+
 ## Run
 
 Start the application from the project directory:
