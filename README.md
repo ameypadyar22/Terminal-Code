@@ -1,112 +1,115 @@
 # Code Terminal
 
-Code Terminal is an agentic, terminal-first AI developer console. It keeps the
-conversation open after every answer, chooses tools when they help, reports each
-tool action clearly, and returns a clean, readable response in the terminal.
+Code Terminal is a terminal-based AI assistant for coding, debugging, and project work. It uses OpenRouter by default, supports OpenAI's Chat Completions API, and lets compatible models call a constrained set of workspace and utility tools.
 
-## Start with OpenRouter
+## Requirements
 
-Requires Node.js 18 or newer. OpenRouter is the default provider. On launch,
-the CLI displays the Code Terminal logo and securely prompts for an API key. The
-input is hidden, stays only in memory for the session, and is acknowledged after
-a valid-looking key is entered. On Windows, paste with `Ctrl+V`, then press
-Enter:
+- Node.js 18 or later
+- A valid API key for either OpenRouter or OpenAI
+
+No package installation is currently required; the CLI uses Node.js built-in modules.
+
+## Run
+
+Start the application from the project directory:
 
 ```powershell
 npm start
 ```
 
-Code Terminal then fetches free OpenRouter models that advertise native tool
-calling. Use the Up/Down arrow keys to select a model and press Enter to run it.
-The first option is `openrouter/free`; every option in this menu uses the same
-`OPENROUTER_API_KEY`. The free router remains free, though tool support and
-model availability can vary by the model selected by OpenRouter.
+If the relevant API-key environment variable is not set, Code Terminal prompts for it at startup with hidden input. The key is kept in memory only for the current session.
 
-If a selected model explicitly rejects native tool calling, Code Terminal shows
-a compatibility notice and retries that request in normal chat mode. This keeps
-the model usable without changing the behavior of models that support agent
-tools.
+Before showing the model selector or command menu, Code Terminal validates the key with the selected provider. If the key has an invalid format or the provider rejects it, the CLI displays `INVALID API KEY` and exits. If the provider cannot be reached or returns another validation error, it displays `API KEY VALIDATION FAILED` and exits; restart the CLI after resolving the connection or provider issue.
 
-To choose a model before starting:
+To install the `code-terminal` command globally, run this once from the project directory:
 
 ```powershell
-$env:CODE_TERMINAL_MODEL = "anthropic/claude-sonnet-4"
+npm link
+```
+
+Open a new PowerShell window afterward. You can then start Code Terminal from any folder:
+
+```powershell
+code-terminal
+```
+
+The folder from which you run the command becomes the workspace available to the agent.
+
+## Providers and models
+
+OpenRouter is the default provider. Set `OPENROUTER_API_KEY` before starting, or enter the key when prompted.
+
+```powershell
+$env:OPENROUTER_API_KEY = "your-openrouter-key"
 npm start
 ```
 
-## Agent tools
+With OpenRouter, the startup model picker requests the current catalog and shows free models that advertise native tool support, plus the `openrouter/free` router. The selector is logo-free so the available models remain in focus. If the catalog cannot be loaded, the CLI uses `openrouter/free`.
 
-The model automatically selects from these tools when a request needs them:
-
-- Calculator — arithmetic and percentage calculations
-- Web search — public-web information
-- Files and search — list directories, find text, and read TXT, JSON, CSV,
-  Markdown, and limited PDF text
-- File writer — create or update text-based project files, including missing
-  parent directories
-- Python — code execution for calculations, processing, and analysis
-- Terminal — allowlisted project commands
-- SQLite — query and modify workspace databases
-- API requests — HTTP GET and POST requests
-- Memory — session-only, non-sensitive preferences
-- Date/time — current time and day calculations
-- JSON and text processing — validate, transform, extract, and count data
-- Git — repository status, branches, logs, diffs, and supported operations
-
-Each tool use is shown as `USING TOOL` in the terminal. The agent remains ready
-for the next request after its answer. Responses use clear headings, bullets,
-and code formatting without heavy box borders.
-
-## Confirmations and limits
-
-File writes, Python execution, SQLite changes, and potentially destructive
-terminal or Git operations require confirmation. Use `y` or `yes` to approve;
-the CLI asks only once per action type during the current request, avoiding
-duplicate prompts. A declined action is not performed.
-
-Workspace file access is restricted to the folder where Code Terminal starts.
-Tool use is capped at eight steps per request. Large files and generated
-directories such as `node_modules`, `.git`, build output, and coverage output
-are skipped. Memory is erased when the CLI closes and rejects likely secrets or
-sensitive information.
-
-## Use OpenAI instead
+Use OpenAI instead by setting both the provider and its API key:
 
 ```powershell
 $env:CODE_TERMINAL_PROVIDER = "openai"
+$env:OPENAI_API_KEY = "your-openai-key"
 npm start
 ```
 
+The default OpenAI model is `gpt-4o-mini`. Override the initial model for either provider with `CODE_TERMINAL_MODEL`:
+
+```powershell
+$env:CODE_TERMINAL_MODEL = "provider/model-name"
+npm start
+```
+
+If a model rejects native tool calling before any tools have run, Code Terminal automatically retries the request in regular chat mode.
+
 ## Commands
 
-- `/` — open the colored arrow-key command palette
-- `/help` — show commands plus the available agent-tool categories
-- `/clear` — begin a fresh conversation
-- `/status` — show provider, active model, tool status, and session status
-- `/model <name>` — change the model for this session
-- `/exit` — close Code Terminal
+| Command | Description |
+| --- | --- |
+| `/` | Open the arrow-key command palette. |
+| `/help` | Show commands and tool categories. |
+| `/clear` | Clear the in-memory conversation. |
+| `/status` | Show provider, model, connection, and session status. |
+| `/model` | Open a model selector; with OpenRouter, refresh the free tool-capable catalog. |
+| `/model <name>` | Set a model name for the current session. |
+| `/exit` or `/quit` | Close Code Terminal. |
 
-Type `/` to open a VS Code-style terminal command palette, then use Up/Down and
-Enter to select a command. `/model` opens an arrow-key model picker directly.
-It refreshes the available free OpenRouter models before displaying options.
-Tab completion remains available after `/` and `/model `, and an unknown slash
-command shows matching command suggestions.
+Tab completion is available for slash commands and known model choices.
 
-## Troubleshooting
+## Agent tools
 
-- If `/model` shows no choices beyond the free router, verify your network and
-  OpenRouter key, then run `/model` again to refresh the catalog.
-- If a model rejects agent tools, Code Terminal retries it automatically in chat
-  mode and prints a compatibility notice.
-- A `Missing Authentication header` response comes from the API being called;
-  provide that API's required authorization through its supported request flow.
+Compatible models can request these tools:
 
-To install the CLI globally from this folder, run `npm link`, then launch it
-from any directory with `code-terminal`.
+- Arithmetic and percentage calculation
+- Public-web search
+- Workspace file listing, text search, and reading
+- Text-file creation and updates
+- Python execution and an allowlisted terminal runner
+- SQLite queries
+- HTTP GET and POST requests
+- Session-only preference memory and date/time calculations
+- JSON and text processing
+- Git inspection and supported Git commands
+
+The CLI displays each model-initiated action as `USING TOOL`. File writes, Python execution, SQLite mutations, and potentially destructive terminal or Git commands ask for confirmation. Approvals apply only to the current user request.
+
+## Limits and safeguards
+
+- Workspace paths are restricted to the directory where Code Terminal started.
+- Directory scans skip `.git`, `node_modules`, `dist`, `build`, and `coverage`.
+- Individual file reads are limited to 100 KB; tool output and tool-write content are limited to 12,000 characters.
+- A prompt may be at most 12,000 characters.
+- The assistant retains up to six conversation exchanges in memory and can take up to eight tool steps per request.
+- API requests have a 45-second overall assistant-request timeout; individual tool web requests use shorter timeouts.
+- Session memory rejects likely sensitive values and is discarded when the CLI closes.
+
+## Test
+
+```powershell
+npm test
+```
 
 ## Security
 
-Keep API keys out of source code, prompts, screenshots, and Git. Code Terminal
-never prints or writes entered keys; environment variables remain an optional
-convenience fallback. See [SECURITY.md](SECURITY.md) for the client protections
-and a recommended server-side relay architecture for production use.
+Do not commit API keys or paste them into prompts, source files, or screenshots. See [SECURITY.md](SECURITY.md) for the project's security notes and deployment guidance.

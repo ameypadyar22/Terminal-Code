@@ -300,6 +300,7 @@ function readClipboardText() {
 
 async function chooseWithArrowKeys(choices, { title = "FREE OPENROUTER MODELS", subtitle = "OpenRouter free models", instructions = "Use ↑/↓ to move · Enter to select · Esc keeps the first option" } = {}) {
   if (!input.isTTY || typeof input.setRawMode !== "function") return choices[0];
+  const showLogo = !title.includes("MODEL");
   let selectedIndex = 0;
   const visibleRows = 8;
   const mainPrompt = terminalInterface;
@@ -308,8 +309,8 @@ async function chooseWithArrowKeys(choices, { title = "FREE OPENROUTER MODELS", 
     const visible = choices.slice(first, first + visibleRows);
     output.write("\x1b[2J\x1b[H");
     console.log(`\n${line("cyan")}`);
-    logo();
-    console.log(`${line("cyan")}\n${tag(title, "green")} ${paint("gray", subtitle)}`);
+    if (showLogo) logo();
+    console.log(`${showLogo ? `${line("cyan")}\n` : ""}${tag(title, "green")} ${paint("gray", subtitle)}`);
     console.log(paint("gray", instructions));
     console.log(`${paint("blue", "  Active selection")} ${paint("cyan", choices[selectedIndex].id)}\n`);
     visible.forEach((choice, offset) => {
@@ -432,10 +433,40 @@ async function requestApiKeyAtStartup() {
     input.resume();
     input.on("data", onData);
   });
-  if (apiKey && hasExpectedKeyFormat(apiKey)) {
-    console.log(`${tag("API KEY ACCEPTED", "green")} ${paint("green", "Key entered securely. Connecting to the provider...")}\n`);
-  } else if (apiKey) {
-    console.log(`${tag("API KEY NOTICE", "yellow")} ${paint("yellow", "Key was entered, but its format could not be verified. The provider will validate it.")}\n`);
+}
+
+async function validateApiKeyAtStartup() {
+  if (!apiKey) {
+    console.log(`\n${tag("API KEY REQUIRED", "yellow")} ${paint("yellow", `Set ${provider === "openrouter" ? "OPENROUTER_API_KEY" : "OPENAI_API_KEY"} or restart and enter a key.`)}\n`);
+    return false;
+  }
+  if (!hasExpectedKeyFormat(apiKey)) {
+    console.log(`\n${tag("INVALID API KEY", "yellow")} ${paint("yellow", "The API key format is not valid. Code Terminal will now exit.")}\n`);
+    return false;
+  }
+
+  const validationUrl = provider === "openrouter"
+    ? "https://openrouter.ai/api/v1/key"
+    : "https://api.openai.com/v1/models";
+  process.stdout.write(`\n${tag("VALIDATING API KEY", "blue")} ${paint("gray", "Checking credentials with the provider...")}\n`);
+  try {
+    const response = await fetch(validationUrl, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(15_000)
+    });
+    if (response.ok) {
+      console.log(`${tag("API KEY ACCEPTED", "green")} ${paint("green", "Key validated. Connecting to the provider...")}\n`);
+      return true;
+    }
+    if (response.status === 401 || response.status === 403) {
+      console.log(`${tag("INVALID API KEY", "yellow")} ${paint("yellow", "The provider rejected this API key. Code Terminal will now exit.")}\n`);
+      return false;
+    }
+    console.log(`${tag("API KEY VALIDATION FAILED", "yellow")} ${paint("yellow", `The provider could not validate the key (${response.status}). Code Terminal will now exit.`)}\n`);
+    return false;
+  } catch {
+    console.log(`${tag("API KEY VALIDATION FAILED", "yellow")} ${paint("yellow", "Could not reach the provider to validate the key. Code Terminal will now exit.")}\n`);
+    return false;
   }
 }
 
@@ -600,6 +631,10 @@ async function askAI(question) {
 
 async function run() {
   await requestApiKeyAtStartup();
+  if (!await validateApiKeyAtStartup()) {
+    process.exitCode = 1;
+    return;
+  }
   await chooseFreeOpenRouterModel();
   banner();
   const rl = readline.createInterface({ input, output, terminal: true, completer: commandCompleter });
