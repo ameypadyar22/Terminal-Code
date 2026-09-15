@@ -36,7 +36,8 @@ immediately in the provider dashboard.
 
 - Provider endpoints are fixed HTTPS allowlisted URLs.
 - API keys stay only in process memory and are never displayed in status, logs,
-  errors, or project files. Startup input is hidden and is not persisted.
+  errors, or project files. Startup input is hidden and is not persisted. On
+  Windows, `Ctrl+V` securely reads the current clipboard into that hidden input.
 - Requests time out after 45 seconds.
 - Input and retained chat history are bounded to reduce accidental data exposure
   and cost.

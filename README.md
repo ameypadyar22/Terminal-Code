@@ -6,7 +6,8 @@ An AI-powered developer console with a terminal-first interface.
 
 Requires Node.js 18 or newer. Code Terminal uses OpenRouter by default and
 securely prompts for the API key when it starts. The key is hidden while typing
-and stays only in memory for that session:
+and stays only in memory for that session. On Windows, paste with `Ctrl+V`, then
+press Enter:
 
 ```powershell
 npm start

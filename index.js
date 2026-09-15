@@ -2,6 +2,7 @@
 
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { execFileSync } from "node:child_process";
 
 const COLORS = {
   reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", blue: "\x1b[34m",
@@ -41,12 +42,26 @@ function apiStatus() {
   return apiKey ? paint("green", "ONLINE") : paint("yellow", "KEY REQUIRED");
 }
 
+function readClipboardText() {
+  if (process.platform !== "win32") return "";
+  try {
+    return execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"],
+      { encoding: "utf8", timeout: 3_000, stdio: ["ignore", "pipe", "ignore"], windowsHide: true }
+    ).replace(/[\r\n]/g, "").trim();
+  } catch {
+    return "";
+  }
+}
+
 async function requestApiKeyAtStartup() {
   if (apiKey || !input.isTTY || typeof input.setRawMode !== "function") return;
 
   console.clear();
   console.log(`\n${line("cyan")}\n${tag("SECURE CONNECTION SETUP", "magenta")}`);
   console.log(paint("gray", `  Enter your ${activeProvider.name} API key. Your input will remain hidden.`));
+  console.log(paint("gray", "  Paste with Ctrl+V, then press Enter."));
   console.log(paint("gray", "  It is kept only in memory for this session and is never written to disk.\n"));
   output.write(paint("cyan", "  API key > "));
 
@@ -63,6 +78,7 @@ async function requestApiKeyAtStartup() {
         if (character === "\u0003") { finish(""); return; }
         if (character === "\r" || character === "\n") { finish(enteredKey); return; }
         if (character === "\b" || character === "\x7f") enteredKey = enteredKey.slice(0, -1);
+        else if (character === "\u0016") enteredKey += readClipboardText();
         else if (character >= " ") enteredKey += character;
       }
     };
