@@ -2,7 +2,10 @@
 
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile } from "node:child_process";
+import { readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
+import path from "node:path";
+import { promisify } from "node:util";
 
 const COLORS = {
   reset: "\x1b[0m", cyan: "\x1b[36m", green: "\x1b[32m", blue: "\x1b[34m",
@@ -13,10 +16,25 @@ const COLORS = {
 const paint = (color, value) => `${COLORS[color]}${value}${COLORS.reset}`;
 const line = (color = "blue") => paint(color, "\u2500".repeat(68));
 const tag = (label, color = "cyan") => paint(color, `${COLORS.bold}[ ${label} ]${COLORS.reset}`);
-const systemPrompt = "You are Code Terminal, a precise and helpful AI assistant inside a developer's command line. Answer coding and technical questions clearly. Use concise Markdown. When you provide code, explain how to use it. Never claim to have run commands or inspected files unless the user supplied that information.";
+function logo() {
+  console.log(paint("cyan", `${COLORS.bold}   ██████╗ ██████╗ ██████╗ ███████╗    ████████╗███████╗██████╗ ███╗   ███╗██╗███╗   ██╗ █████╗ ██╗`));
+  console.log(paint("cyan", `${COLORS.bold}  ██╔════╝██╔═══██╗██╔══██╗██╔════╝    ╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██║████╗  ██║██╔══██╗██║`));
+  console.log(paint("cyan", `${COLORS.bold}  ██║     ██║   ██║██║  ██║█████╗         ██║   █████╗  ██████╔╝██╔████╔██║██║██╔██╗ ██║███████║██║`));
+  console.log(paint("cyan", `${COLORS.bold}  ██║     ██║   ██║██║  ██║██╔══╝         ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██║██║╚██╗██║██╔══██║██║`));
+  console.log(paint("cyan", `${COLORS.bold}  ╚██████╗╚██████╔╝██████╔╝███████╗       ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║██║ ╚████║██║  ██║███████╗`));
+  console.log(paint("cyan", `${COLORS.bold}   ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝       ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝`));
+}
+const workspaceRoot = path.resolve(process.cwd());
+const systemPrompt = "You are Code Terminal, a precise and helpful agentic assistant in a developer's command line. Decide whether a tool would make the answer more accurate or complete and use it when appropriate. Clearly explain outcomes. Use only the provided tools. File writes, Python execution, database mutations, and potentially destructive shell or Git commands require the user's confirmation; never imply an action occurred when it was declined or failed. Do not store secrets, credentials, financial data, health data, or other sensitive personal information in memory.";
 const MAX_PROMPT_LENGTH = 12_000;
 const MAX_EXCHANGES = 6;
 const REQUEST_TIMEOUT_MS = 45_000;
+const MAX_AGENT_STEPS = 8;
+const MAX_TOOL_RESULTS = 40;
+const MAX_FILE_BYTES = 100_000;
+const MAX_TOOL_OUTPUT = 12_000;
+const IGNORED_DIRECTORIES = new Set([".git", "node_modules", "dist", "build", "coverage"]);
+const execFileAsync = promisify(execFile);
 
 const requestedProvider = (process.env.CODE_TERMINAL_PROVIDER || "openrouter").toLowerCase();
 const providers = Object.freeze({
@@ -28,14 +46,239 @@ const activeProvider = providers[provider];
 let model = process.env.CODE_TERMINAL_MODEL || activeProvider.defaultModel;
 let messages = [];
 let apiKey = activeProvider.key?.trim() || "";
+let approvedActionTypes = new Set();
+let terminalInterface = null;
+let selectableModels = ["openrouter/free"];
+let selectableModelChoices = [{ id: "openrouter/free", name: "OpenRouter Free (automatic router)", context: 0 }];
+
+const commandHints = Object.freeze({
+  "/help": "show commands and agent tools",
+  "/clear": "start a fresh conversation",
+  "/status": "show provider, model, and session status",
+  "/model <name>": "change the active model",
+  "/exit": "close Code Terminal"
+});
+
+const tool = (name, description, properties = {}, required = []) => ({ type: "function", function: { name, description, parameters: { type: "object", properties, required, additionalProperties: false } } });
+const string = (description) => ({ type: "string", description });
+const agentTools = [
+  tool("calculate", "Safely evaluate a mathematical expression, including percentages such as 25% of 4500.", { expression: string("Math expression") }, ["expression"]),
+  tool("web_search", "Search the public web for current information.", { query: string("Search query") }, ["query"]),
+  tool("list_files", "List files and directories in a workspace directory.", { path: string("Relative directory; default '.'") }),
+  tool("search_files", "Search workspace text files for a literal string, optionally limited by file extension.", { query: string("Literal text"), extension: string("Optional extension, such as .py") }, ["query"]),
+  tool("read_file", "Read and summarize-ready content from TXT, JSON, CSV, Markdown, or PDF files in the workspace.", { path: string("Relative file path") }, ["path"]),
+  tool("write_file", "Create or replace a text-based file in the workspace, including required parent directories. Confirmation is requested once per request.", { path: string("Relative output path"), content: string("Complete file content") }, ["path", "content"]),
+  tool("run_python", "Run Python for calculation or data analysis. Always asks the user for confirmation and has a time limit.", { code: string("Python code") }, ["code"]),
+  tool("run_terminal", "Run a safe, allowlisted terminal command in the workspace. Destructive commands require confirmation.", { command: string("Command program"), args: { type: "array", items: { type: "string" }, description: "Command arguments" } }, ["command"]),
+  tool("sqlite_query", "Run SQLite SQL against a workspace .db file. Mutating SQL requires confirmation.", { database: string("Relative .db path"), sql: string("SQLite SQL"), params: { type: "array", items: {} } }, ["database", "sql"]),
+  tool("api_request", "Make a JSON HTTP GET or POST request to an API.", { url: string("http(s) URL"), method: string("GET or POST; default GET"), body: string("Optional JSON request body") }, ["url"]),
+  tool("memory", "Save, retrieve, list, or forget non-sensitive user preferences in local session memory.", { action: string("save, get, list, or forget"), key: string("Memory key"), value: string("Non-sensitive value") }, ["action"]),
+  tool("date_time", "Get the local date/time or calculate the number of days until an ISO date.", { target_date: string("Optional YYYY-MM-DD target date") }),
+  tool("json_tool", "Parse, validate, pretty-print, or modify JSON text.", { operation: string("validate, pretty, get, or set"), json: string("JSON text"), key: string("Property key for get or set"), value: string("JSON value for set") }, ["operation", "json"]),
+  tool("text_process", "Count words, extract lines containing a term, or transform text to upper/lower case.", { operation: string("word_count, extract, upper, or lower"), text: string("Text to process"), query: string("Term for extract") }, ["operation", "text"]),
+  tool("git", "Inspect repository status, branches, log, diff, or run a Git operation. Destructive operations require confirmation.", { args: { type: "array", items: { type: "string" }, description: "Git arguments" } }, ["args"])
+];
 
 function isSafeModelName(value) {
   return /^[a-zA-Z0-9._:/-]{1,160}$/.test(value);
 }
 
+function resolveWorkspacePath(relativePath = ".") {
+  if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("A relative workspace path is required.");
+  const resolved = path.resolve(workspaceRoot, relativePath);
+  if (resolved !== workspaceRoot && !resolved.startsWith(`${workspaceRoot}${path.sep}`)) {
+    throw new Error("Path must stay inside the current workspace.");
+  }
+  return resolved;
+}
+
+async function listWorkspaceFiles(directory, prefix = "", results = []) {
+  if (results.length >= MAX_TOOL_RESULTS) return results;
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (results.length >= MAX_TOOL_RESULTS || IGNORED_DIRECTORIES.has(entry.name)) continue;
+    const entryPath = path.join(directory, entry.name);
+    const relative = path.join(prefix, entry.name).replaceAll("\\", "/");
+    results.push(entry.isDirectory() ? `${relative}/` : relative);
+  }
+  return results;
+}
+
+async function searchWorkspace(directory, query, extension = "", prefix = "", matches = []) {
+  if (matches.length >= MAX_TOOL_RESULTS) return matches;
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (matches.length >= MAX_TOOL_RESULTS || IGNORED_DIRECTORIES.has(entry.name)) continue;
+    const entryPath = path.join(directory, entry.name);
+    const relative = path.join(prefix, entry.name).replaceAll("\\", "/");
+    if (entry.isDirectory()) await searchWorkspace(entryPath, query, extension, relative, matches);
+    else if (entry.isFile()) {
+      if (extension && !entry.name.toLowerCase().endsWith(extension.toLowerCase())) continue;
+      const info = await stat(entryPath);
+      if (info.size > MAX_FILE_BYTES) continue;
+      const content = await readFile(entryPath, "utf8");
+      content.split(/\r?\n/).forEach((line, index) => {
+        if (matches.length < MAX_TOOL_RESULTS && line.includes(query)) matches.push(`${relative}:${index + 1}: ${line.slice(0, 300)}`);
+      });
+    }
+  }
+  return matches;
+}
+
+const memory = new Map();
+function truncate(value) { return String(value).slice(0, MAX_TOOL_OUTPUT); }
+function isSensitive(value) { return /(password|secret|api[_ -]?key|token|credit.?card|cvv|social security|medical)/i.test(value); }
+async function confirmAction(actionType, summary) {
+  if (approvedActionTypes.has(actionType)) return true;
+  const prompt = terminalInterface || readline.createInterface({ input, output, terminal: true });
+  const reply = (await prompt.question(`\n${tag("CONFIRM ACTION", "yellow")} ${summary}\n${paint("yellow", "Continue? [y/N]: ")}`)).trim().toLowerCase();
+  if (!terminalInterface) prompt.close();
+  const approved = reply === "y" || reply === "yes";
+  if (approved) approvedActionTypes.add(actionType);
+  return approved;
+}
+
+function calculate(expression) {
+  const normalized = expression.replace(/(\d+(?:\.\d+)?)\s*%\s*of\s*/gi, "($1/100)*").replace(/(\d+(?:\.\d+)?)\s*%/g, "($1/100)");
+  if (!/^[\d\s+*/().-]+$/.test(normalized)) throw new Error("Only arithmetic operators, parentheses, decimals, and percentages are allowed.");
+  const result = Function(`"use strict"; return (${normalized})`)();
+  if (!Number.isFinite(result)) throw new Error("Calculation did not produce a finite number.");
+  return String(result);
+}
+
+async function readDocument(target) {
+  const info = await stat(target);
+  if (!info.isFile()) throw new Error("Path is not a file.");
+  if (info.size > MAX_FILE_BYTES) throw new Error(`File exceeds the ${MAX_FILE_BYTES}-byte read limit.`);
+  if (path.extname(target).toLowerCase() === ".pdf") {
+    const raw = await readFile(target);
+    const text = raw.toString("latin1").match(/[\x20-\x7e]{20,}/g)?.join("\n") || "";
+    return text ? `PDF text extraction (limited):\n${truncate(text)}` : "PDF text could not be extracted. Use a text-based PDF or install a PDF extraction utility.";
+  }
+  return readFile(target, "utf8");
+}
+
+async function runCommand(command, args = []) {
+  const outputResult = await execFileAsync(command, args.map(String), { cwd: workspaceRoot, timeout: 10_000, windowsHide: true, maxBuffer: MAX_TOOL_OUTPUT });
+  return truncate(`${outputResult.stdout}${outputResult.stderr ? `\n${outputResult.stderr}` : ""}`.trim() || "Command completed with no output.");
+}
+
+async function executeToolCall(toolCall) {
+  const toolName = toolCall.function?.name;
+  let args;
+  try { args = JSON.parse(toolCall.function?.arguments || "{}"); }
+  catch { return "Error: tool arguments were not valid JSON."; }
+  try {
+    if (toolName === "calculate") return calculate(args.expression);
+    if (toolName === "web_search") {
+      const response = await fetch(`https://api.duckduckgo.com/?q=${encodeURIComponent(args.query)}&format=json&no_html=1`, { signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) throw new Error(`Search request failed (${response.status}).`);
+      const data = await response.json();
+      const results = [data.AbstractText && { title: data.Heading || args.query, text: data.AbstractText, url: data.AbstractURL }, ...(data.RelatedTopics || []).flatMap((item) => item.Topics || [item]).filter((item) => item?.Text).slice(0, 8).map((item) => ({ text: item.Text, url: item.FirstURL }))].filter(Boolean);
+      return JSON.stringify({ query: args.query, results });
+    }
+    if (toolName === "list_files") {
+      const requestedPath = args.path || ".";
+      const target = resolveWorkspacePath(requestedPath);
+      if (!(await stat(target)).isDirectory()) throw new Error("Path is not a directory.");
+      const entries = await listWorkspaceFiles(target);
+      return JSON.stringify({ path: requestedPath, entries, truncated: entries.length === MAX_TOOL_RESULTS });
+    }
+    if (toolName === "read_file") {
+      const target = resolveWorkspacePath(args.path);
+      return await readDocument(target);
+    }
+    if (toolName === "search_files") {
+      if (typeof args.query !== "string" || !args.query) throw new Error("Search query is required.");
+      const matches = await searchWorkspace(workspaceRoot, args.query, args.extension || "");
+      return JSON.stringify({ query: args.query, matches, truncated: matches.length === MAX_TOOL_RESULTS });
+    }
+    if (toolName === "write_file") {
+      if (typeof args.content !== "string" || args.content.length > MAX_TOOL_OUTPUT) throw new Error("Content must be text under 12,000 characters.");
+      const target = resolveWorkspacePath(args.path);
+      if (!await confirmAction("file_write", `Create or update ${args.path}?`)) return "User declined the file write.";
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, args.content, "utf8");
+      return `Wrote ${args.content.length} characters to ${args.path}.`;
+    }
+    if (toolName === "run_python") {
+      if (!await confirmAction("python", "Run generated Python code in the current workspace?")) return "User declined Python execution.";
+      return await runCommand("python", ["-c", args.code]);
+    }
+    if (toolName === "run_terminal") {
+      const command = String(args.command || "").toLowerCase();
+      const allowed = new Set(["git", "node", "python", "python3"]);
+      if (command === "dir" || command === "ls") return JSON.stringify({ entries: await listWorkspaceFiles(workspaceRoot) });
+      if (!allowed.has(command)) throw new Error("Only git, node, python, python3, dir, and ls are allowlisted. Use the dedicated tools where available.");
+      const commandText = `${command} ${(args.args || []).join(" ")}`;
+      if (/(reset|clean|checkout|restore|rebase|commit|push|rm|delete)/i.test(commandText) && !await confirmAction("terminal_destructive", `Run potentially destructive command: ${commandText}?`)) return "User declined the terminal command.";
+      return await runCommand(command, args.args || []);
+    }
+    if (toolName === "sqlite_query") {
+      if (!/\.(db|sqlite|sqlite3)$/i.test(args.database)) throw new Error("Database path must end in .db, .sqlite, or .sqlite3.");
+      const target = resolveWorkspacePath(args.database);
+      const mutation = /^\s*(insert|update|delete|create|drop|alter|replace)/i.test(args.sql);
+      if (mutation && !await confirmAction("sqlite_mutation", `Run mutating SQLite query against ${args.database}?`)) return "User declined the database change.";
+      const script = "import sqlite3,json,sys; c=sqlite3.connect(sys.argv[1]); c.row_factory=sqlite3.Row; cur=c.execute(sys.argv[2],json.loads(sys.argv[3])); rows=[dict(r) for r in cur.fetchall()] if cur.description else []; c.commit(); print(json.dumps({'rows':rows,'rows_affected':cur.rowcount}))";
+      return await runCommand("python", ["-c", script, target, args.sql, JSON.stringify(args.params || [])]);
+    }
+    if (toolName === "api_request") {
+      const method = (args.method || "GET").toUpperCase();
+      if (!/^https?:\/\//i.test(args.url) || !["GET", "POST"].includes(method)) throw new Error("Only HTTP(S) GET and POST requests are supported.");
+      const response = await fetch(args.url, { method, headers: args.body ? { "Content-Type": "application/json" } : {}, body: method === "POST" ? args.body || undefined : undefined, signal: AbortSignal.timeout(15_000) });
+      return JSON.stringify({ status: response.status, body: truncate(await response.text()) });
+    }
+    if (toolName === "memory") {
+      const key = args.key?.trim();
+      if (args.action === "list") return JSON.stringify(Object.fromEntries(memory));
+      if (args.action === "get") return memory.has(key) ? memory.get(key) : "No saved value for that key.";
+      if (args.action === "forget") { memory.delete(key); return `Forgot ${key}.`; }
+      if (args.action === "save") { if (!key || !args.value) throw new Error("A key and value are required."); if (isSensitive(`${key} ${args.value}`)) throw new Error("Sensitive information is not stored in memory."); memory.set(key, args.value); return `Remembered ${key} for this session.`; }
+      throw new Error("Memory action must be save, get, list, or forget.");
+    }
+    if (toolName === "date_time") {
+      const now = new Date();
+      if (!args.target_date) return now.toString();
+      const target = new Date(`${args.target_date}T00:00:00`);
+      if (Number.isNaN(target.valueOf())) throw new Error("Use target date format YYYY-MM-DD.");
+      return `${Math.ceil((target - now) / 86_400_000)} day(s) until ${args.target_date}.`;
+    }
+    if (toolName === "json_tool") {
+      const value = JSON.parse(args.json);
+      if (args.operation === "validate") return "Valid JSON.";
+      if (args.operation === "pretty") return JSON.stringify(value, null, 2);
+      if (args.operation === "get") return JSON.stringify(value[args.key]);
+      if (args.operation === "set") { value[args.key] = JSON.parse(args.value); return JSON.stringify(value, null, 2); }
+      throw new Error("JSON operation must be validate, pretty, get, or set.");
+    }
+    if (toolName === "text_process") {
+      if (args.operation === "word_count") return String((args.text.match(/\S+/g) || []).length);
+      if (args.operation === "upper") return args.text.toUpperCase();
+      if (args.operation === "lower") return args.text.toLowerCase();
+      if (args.operation === "extract") return args.text.split(/\r?\n/).filter((line) => line.includes(args.query || "")).join("\n");
+      throw new Error("Text operation must be word_count, extract, upper, or lower.");
+    }
+    if (toolName === "git") {
+      const gitArgs = args.args || [];
+      if (!Array.isArray(gitArgs) || !gitArgs.length) throw new Error("Git arguments are required.");
+      const commandText = gitArgs.join(" ");
+      if (/(reset|clean|checkout|restore|rebase|commit|push|rm)/i.test(commandText) && !await confirmAction("git_destructive", `Run potentially destructive Git command: git ${commandText}?`)) return "User declined the Git command.";
+      return await runCommand("git", gitArgs);
+    }
+    return `Error: unknown tool '${toolName}'.`;
+  } catch (error) {
+    return `Error: ${error.message}`;
+  }
+}
+
 function safeFailure(error) {
   if (error?.name === "AbortError") return "Request timed out. Check your connection and try again.";
+  if (error?.message) return `Request failed: ${error.message.slice(0, 300)}`;
   return "Request could not be completed. Check your provider, API key, and network connection.";
+}
+
+function isToolCompatibilityError(message) {
+  return /(tool_choice|tool call|function call|function.tool|tools.*(support|allow|invalid)|does not support.*tool)/i.test(message);
 }
 
 function apiStatus() {
@@ -55,6 +298,56 @@ function readClipboardText() {
   }
 }
 
+async function chooseWithArrowKeys(choices, { title = "FREE OPENROUTER MODELS", subtitle = "OpenRouter free models", instructions = "Use ↑/↓ to move · Enter to select · Esc keeps the first option" } = {}) {
+  if (!input.isTTY || typeof input.setRawMode !== "function") return choices[0];
+  let selectedIndex = 0;
+  const visibleRows = 8;
+  const mainPrompt = terminalInterface;
+  const render = () => {
+    const first = Math.max(0, Math.min(selectedIndex - Math.floor(visibleRows / 2), Math.max(0, choices.length - visibleRows)));
+    const visible = choices.slice(first, first + visibleRows);
+    output.write("\x1b[2J\x1b[H");
+    console.log(`\n${line("cyan")}`);
+    logo();
+    console.log(`${line("cyan")}\n${tag(title, "green")} ${paint("gray", subtitle)}`);
+    console.log(paint("gray", instructions));
+    console.log(`${paint("blue", "  Active selection")} ${paint("cyan", choices[selectedIndex].id)}\n`);
+    visible.forEach((choice, offset) => {
+      const active = first + offset === selectedIndex;
+      const pointer = active ? paint("green", "❯") : paint("gray", "·");
+      const choiceColor = choice.color || "cyan";
+      console.log(`${pointer} ${active ? paint(choiceColor, `${COLORS.bold}${choice.name}`) : paint(choiceColor, choice.name)}`);
+      if (active) {
+        const detail = typeof choice.context === "number" ? (choice.context ? ` · ${(choice.context / 1000).toFixed(0)}k context` : "") : choice.context ? ` · ${choice.context}` : "";
+        console.log(paint("gray", `    ${choice.id}${detail}`));
+      }
+    });
+    if (choices.length > visibleRows) console.log(paint("gray", `\n  ${selectedIndex + 1} of ${choices.length}`));
+  };
+  return new Promise((resolve) => {
+    const finish = (choice) => {
+      input.off("data", onData);
+      input.setRawMode(false);
+      output.write("\x1b[?25h\n");
+      if (mainPrompt) mainPrompt.resume();
+      resolve(choice);
+    };
+    const onData = (chunk) => {
+      const key = chunk.toString("utf8");
+      if (key === "\u0003" || key === "\u001b") { finish(choices[0]); return; }
+      if (key === "\r" || key === "\n") { finish(choices[selectedIndex]); return; }
+      if (key === "\u001b[A") { selectedIndex = (selectedIndex - 1 + choices.length) % choices.length; render(); }
+      if (key === "\u001b[B") { selectedIndex = (selectedIndex + 1) % choices.length; render(); }
+    };
+    if (mainPrompt) mainPrompt.pause();
+    input.setRawMode(true);
+    input.resume();
+    input.on("data", onData);
+    output.write("\x1b[?25l");
+    render();
+  });
+}
+
 async function chooseFreeOpenRouterModel() {
   if (provider !== "openrouter" || !apiKey) return;
   process.stdout.write(`\n${tag("FREE MODEL SELECTOR", "green")} ${paint("gray", "Loading currently available free models...")}\n`);
@@ -67,29 +360,23 @@ async function chooseFreeOpenRouterModel() {
     const data = await response.json();
     const freeModels = (data.data || [])
       .filter((item) => item.id?.endsWith(":free") || (Number(item.pricing?.prompt) === 0 && Number(item.pricing?.completion) === 0))
+      .filter((item) => (item.supported_parameters || []).includes("tools"))
       .map((item) => ({ id: item.id, name: item.name || item.id, context: item.context_length }))
       .sort((left, right) => left.name.localeCompare(right.name));
-    if (!freeModels.length) throw new Error("No free models found");
+    if (!freeModels.length) throw new Error("No free tool-capable models found");
 
-    console.log(`${paint("green", "  0.")} ${paint("cyan", "openrouter/free")} ${paint("gray", "— automatic free-model router (recommended)")}`);
-    freeModels.forEach((item, index) => {
-      const context = item.context ? ` · ${(item.context / 1000).toFixed(0)}k context` : "";
-      console.log(`${paint("green", `  ${index + 1}.`.padEnd(5))}${paint("white", item.name)}\n${paint("gray", `       ${item.id}${context}`)}`);
-    });
-
-    const selector = readline.createInterface({ input, output, terminal: true });
-    const selected = (await selector.question(`\n${paint("green", "  Select a free model [0]: ")}`)).trim();
-    selector.close();
-    if (!selected || selected === "0") model = "openrouter/free";
-    else if (/^\d+$/.test(selected) && freeModels[Number(selected) - 1]) model = freeModels[Number(selected) - 1].id;
-    else {
-      console.log(paint("yellow", "  Invalid choice — using the automatic free-model router."));
-      model = "openrouter/free";
-    }
+    const choices = [
+      { id: "openrouter/free", name: "OpenRouter Free (automatic router)", context: 0 },
+      ...freeModels
+    ];
+    selectableModels = choices.map((choice) => choice.id);
+    selectableModelChoices = choices;
+    const selected = await chooseWithArrowKeys(choices, { title: "MODEL SELECTOR", subtitle: "OpenRouter free models", instructions: "Use ↑/↓ to move · Enter to select · Esc keeps the free router" });
+    model = selected.id;
     console.log(`${tag("FREE MODEL ACTIVE", "green")} ${paint("cyan", model)}\n`);
   } catch {
     model = "openrouter/free";
-    console.log(paint("yellow", "  Free catalog unavailable — using OpenRouter's automatic free-model router.\n"));
+    console.log(paint("yellow", "  Agent-capable free catalog unavailable — using OpenRouter's automatic free-model router.\n"));
   }
 }
 
@@ -98,20 +385,27 @@ function formatAnswer(answer) {
   return answer.split("\n").map((text) => {
     if (text.trimStart().startsWith("```")) {
       inCodeBlock = !inCodeBlock;
-      return paint("magenta", `  ${inCodeBlock ? "╭─ CODE" : "╰─"}`);
+      return paint("magenta", inCodeBlock ? "Code" : "");
     }
-    if (inCodeBlock) return `${paint("green", "  │")} ${paint("white", text)}`;
-    if (/^#{1,6}\s+/.test(text)) return `\n${paint("cyan", `  ${text.replace(/^#+\s+/, "")}`)}`;
-    if (/^\s*[-*]\s+/.test(text)) return `${paint("blue", "  •")} ${text.replace(/^\s*[-*]\s+/, "")}`;
-    return text ? `${paint("gray", "  │")} ${text}` : "";
+    if (inCodeBlock) return `  ${paint("green", text)}`;
+    if (/^#{1,6}\s+/.test(text)) return `\n${paint("cyan", `${COLORS.bold}${text.replace(/^#+\s+/, "")}`)}`;
+    if (/^\s*[-*]\s+/.test(text)) return `${paint("blue", "• ")}${text.replace(/^\s*[-*]\s+/, "")}`;
+    if (/^\s*\d+\.\s+/.test(text)) return `${paint("blue", text.match(/^\s*\d+\./)[0])} ${text.replace(/^\s*\d+\.\s+/, "")}`;
+    return text ? paint("white", text) : "";
   }).join("\n");
+}
+
+function hasExpectedKeyFormat(value) {
+  return provider === "openrouter" ? /^sk-or-v1-[A-Za-z0-9_-]{16,}$/.test(value) : /^sk-[A-Za-z0-9_-]{16,}$/.test(value);
 }
 
 async function requestApiKeyAtStartup() {
   if (apiKey || !input.isTTY || typeof input.setRawMode !== "function") return;
 
   console.clear();
-  console.log(`\n${line("cyan")}\n${tag("SECURE CONNECTION SETUP", "magenta")}`);
+  console.log(`\n${line("cyan")}`);
+  logo();
+  console.log(`${line("cyan")}\n${tag("SECURE CONNECTION SETUP", "magenta")}`);
   console.log(paint("gray", `  Enter your ${activeProvider.name} API key. Your input will remain hidden.`));
   console.log(paint("gray", "  Paste with Ctrl+V, then press Enter."));
   console.log(paint("gray", "  It is kept only in memory for this session and is never written to disk.\n"));
@@ -138,6 +432,11 @@ async function requestApiKeyAtStartup() {
     input.resume();
     input.on("data", onData);
   });
+  if (apiKey && hasExpectedKeyFormat(apiKey)) {
+    console.log(`${tag("API KEY ACCEPTED", "green")} ${paint("green", "Key entered securely. Connecting to the provider...")}\n`);
+  } else if (apiKey) {
+    console.log(`${tag("API KEY NOTICE", "yellow")} ${paint("yellow", "Key was entered, but its format could not be verified. The provider will validate it.")}\n`);
+  }
 }
 
 function banner() {
@@ -166,8 +465,53 @@ function help() {
   ${paint("cyan", "/model <name>").padEnd(22)} Change the AI model
   ${paint("cyan", "/exit").padEnd(22)} Close Code Terminal
 
+${tag("AGENT TOOLS", "green")}
+  ${paint("cyan", "Calculate").padEnd(22)} Arithmetic and percentages
+  ${paint("cyan", "Web search").padEnd(22)} Current public-web information
+  ${paint("cyan", "Files & search").padEnd(22)} List, find, read, and create project files
+  ${paint("cyan", "Python & terminal").padEnd(22)} Analysis and safe commands
+  ${paint("cyan", "SQLite & APIs").padEnd(22)} Database queries and HTTP requests
+  ${paint("cyan", "Memory & date/time").padEnd(22)} Session preferences and date calculations
+  ${paint("cyan", "JSON, text & Git").padEnd(22)} Data processing and repository inspection
+
+${paint("gray", "  Confirmations: ")}Writes, Python, database changes, and risky terminal or Git actions ask before proceeding.
 ${paint("gray", "  Setup: ")}Set ${paint("yellow", "OPENROUTER_API_KEY")} (default) or select OpenAI with ${paint("yellow", "CODE_TERMINAL_PROVIDER")}.
 ${line("magenta")}\n`);
+}
+
+function commandSuggestions(prefix = "") {
+  const suggestions = Object.entries(commandHints)
+    .filter(([command]) => command.startsWith(prefix))
+    .map(([command, description]) => `  ${paint("cyan", command.padEnd(22))} ${paint("gray", description)}`);
+  console.log(`\n${tag("COMMAND SUGGESTIONS", "green")}`);
+  console.log(suggestions.length ? suggestions.join("\n") : paint("yellow", "  No matching command. Type /help to see all commands."));
+  console.log(paint("gray", "\n  Tip: press Tab after / to autocomplete a command.\n"));
+}
+
+function commandCompleter(lineInput) {
+  if (lineInput.startsWith("/model ")) {
+    const candidates = selectableModels.map((candidate) => `/model ${candidate}`);
+    const hits = candidates.filter((candidate) => candidate.startsWith(lineInput));
+    return [hits.length ? hits : candidates, lineInput];
+  }
+  const candidates = Object.keys(commandHints);
+  const hits = candidates.filter((command) => command.startsWith(lineInput));
+  return [hits.length ? hits : candidates, lineInput];
+}
+
+async function openCommandPalette() {
+  const choices = [
+    { id: "/help", name: "/help", context: "Show commands and tools", color: "cyan" },
+    { id: "/clear", name: "/clear", context: "Start a fresh conversation", color: "yellow" },
+    { id: "/status", name: "/status", context: "View connection and model status", color: "blue" },
+    { id: "/model", name: "/model", context: "Choose a different model", color: "magenta" },
+    { id: "/exit", name: "/exit", context: "Close Code Terminal", color: "green" }
+  ];
+  return chooseWithArrowKeys(choices, {
+    title: "COMMAND PALETTE",
+    subtitle: "Choose a Code Terminal command",
+    instructions: "Use ↑/↓ to move · Enter to run · Esc selects /help"
+  });
 }
 
 function status() {
@@ -176,6 +520,7 @@ function status() {
   Provider        ${paint("magenta", activeProvider.name)}
   API connection  ${apiStatus()}
   Active model    ${paint("cyan", model)}
+  Agent tools     ${paint("green", "15 tools active")}
   Memory          ${paint("white", `${exchanges} exchange${exchanges === 1 ? "" : "s"}`)}
 ${line("blue")}\n`);
 }
@@ -193,6 +538,7 @@ async function askAI(question) {
     return;
   }
 
+  approvedActionTypes = new Set();
   const requestMessages = [{ role: "system", content: systemPrompt }, ...messages, { role: "user", content: question }];
   process.stdout.write(`\n${tag("CODE TERMINAL", "magenta")} ${paint("gray", "Processing your request...")}\n${paint("gray", "  \u2502")}\n`);
 
@@ -200,24 +546,49 @@ async function askAI(question) {
   let timeout;
   try {
     timeout = setTimeout(() => abortController.abort(), REQUEST_TIMEOUT_MS);
-    const response = await fetch(activeProvider.endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        ...(provider === "openrouter" ? { "X-Title": "Code Terminal" } : {})
-      },
-      body: JSON.stringify({ model, messages: requestMessages }),
-      signal: abortController.signal
-    });
-    const data = await response.json();
-    if (!response.ok) throw new Error(`Provider rejected request (${response.status})`);
-    const answer = data.choices?.[0]?.message?.content?.trim();
-    if (!answer) throw new Error("The AI returned an empty response.");
+    let answer = "";
+    let nativeToolsEnabled = true;
+    for (let step = 0; step < MAX_AGENT_STEPS; step += 1) {
+      const response = await fetch(activeProvider.endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          ...(provider === "openrouter" ? { "X-Title": "Code Terminal" } : {})
+        },
+        body: JSON.stringify({ model, messages: requestMessages, ...(nativeToolsEnabled ? { tools: agentTools, tool_choice: "auto" } : {}) }),
+        signal: abortController.signal
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data.error?.message || `Provider rejected request (${response.status})`;
+        if (nativeToolsEnabled && !requestMessages.some((message) => message.role === "tool") && isToolCompatibilityError(detail)) {
+          nativeToolsEnabled = false;
+          console.log(`${tag("MODEL COMPATIBILITY", "yellow")} ${paint("yellow", "This model does not support native tools. Retrying in chat mode.")}`);
+          continue;
+        }
+        throw new Error(detail);
+      }
+      const assistantMessage = data.choices?.[0]?.message;
+      if (!assistantMessage) throw new Error("The AI returned an empty response.");
+      const toolCalls = assistantMessage.tool_calls || [];
+      const modelText = assistantMessage.content?.trim() || "";
+      if (!toolCalls.length || modelText) {
+        answer = modelText;
+        break;
+      }
+      requestMessages.push({ role: "assistant", content: assistantMessage.content || "", tool_calls: toolCalls });
+      for (const toolCall of toolCalls) {
+        const toolName = toolCall.function?.name || "workspace tool";
+        process.stdout.write(`${tag("USING TOOL", "blue")} ${paint("cyan", toolName)}\n`);
+        requestMessages.push({ role: "tool", tool_call_id: toolCall.id, content: await executeToolCall(toolCall) });
+      }
+    }
+    if (!answer) throw new Error(`The agent did not produce a final answer within ${MAX_AGENT_STEPS} tool steps.`);
 
-    console.log(paint("cyan", "  \u256d\u2500\u2500\u2500 AI RESPONSE \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"));
+    console.log(`\n${tag("AI RESPONSE", "cyan")} ${paint("gray", `via ${model}`)}`);
     console.log(formatAnswer(answer));
-    console.log(`${paint("gray", "  \u2570")}${line("blue")}\n`);
+    console.log();
     messages.push({ role: "user", content: question }, { role: "assistant", content: answer });
     messages = messages.slice(-(MAX_EXCHANGES * 2));
   } catch (error) {
@@ -231,7 +602,8 @@ async function run() {
   await requestApiKeyAtStartup();
   await chooseFreeOpenRouterModel();
   banner();
-  const rl = readline.createInterface({ input, output, terminal: true });
+  const rl = readline.createInterface({ input, output, terminal: true, completer: commandCompleter });
+  terminalInterface = rl;
   rl.on("SIGINT", () => rl.close());
 
   while (true) {
@@ -240,11 +612,27 @@ async function run() {
       lineInput = (await rl.question(`${paint("green", "\u250c\u2500")}${paint("cyan", " user@code-terminal")}${paint("gray", " :: ")}${paint("magenta", "ask")}${paint("green", " \u276f ")}`)).trim();
     } catch { break; }
     if (!lineInput) continue;
+    if (lineInput === "/") lineInput = (await openCommandPalette()).id;
     if (lineInput === "/exit" || lineInput === "/quit") break;
     if (lineInput === "/help") { help(); continue; }
     if (lineInput === "/status") { status(); continue; }
     if (lineInput === "/clear") { messages = []; banner(); continue; }
-    if (lineInput === "/model") { console.log(`\n${tag("ACTIVE MODEL", "blue")} ${paint("cyan", model)}\n`); continue; }
+    if (lineInput === "/model") {
+      if (provider === "openrouter" && apiKey) {
+        await chooseFreeOpenRouterModel();
+        console.log(`${tag("MODEL UPDATED", "green")} ${paint("cyan", model)}\n`);
+        continue;
+      }
+      const selected = await chooseWithArrowKeys(selectableModelChoices, {
+        title: "MODEL SELECTOR",
+        subtitle: "Choose the model for this session",
+        instructions: "Use ↑/↓ to move · Enter to activate · Esc keeps the current list default"
+      });
+      model = selected.id;
+      console.log(`\n${tag("MODEL UPDATED", "green")} ${paint("cyan", model)}`);
+      console.log(paint("gray", "  This OpenRouter model uses your current OpenRouter API key.\n"));
+      continue;
+    }
     if (lineInput.startsWith("/model ")) {
       const candidate = lineInput.slice(7).trim();
       if (!isSafeModelName(candidate)) {
@@ -255,9 +643,11 @@ async function run() {
       console.log(`\n${tag("MODEL UPDATED", "green")} ${paint("cyan", model)}\n`);
       continue;
     }
+    if (lineInput.startsWith("/")) { commandSuggestions(lineInput); continue; }
     await askAI(lineInput);
   }
   rl.close();
+  terminalInterface = null;
   console.log(`\n${line("blue")}\n${paint("gray", "  Session closed. Keep shipping.\n")}`);
 }
 
