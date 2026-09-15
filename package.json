@@ -1,0 +1,16 @@
+{
+  "name": "code-terminal",
+  "version": "1.0.0",
+  "description": "A friendly AI coding assistant in your terminal.",
+  "type": "module",
+  "bin": {
+    "code-terminal": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
