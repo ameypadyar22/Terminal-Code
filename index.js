@@ -26,6 +26,7 @@ const provider = providers[requestedProvider] ? requestedProvider : "openrouter"
 const activeProvider = providers[provider];
 let model = process.env.CODE_TERMINAL_MODEL || activeProvider.defaultModel;
 let messages = [];
+let apiKey = activeProvider.key?.trim() || "";
 
 function isSafeModelName(value) {
   return /^[a-zA-Z0-9._:/-]{1,160}$/.test(value);
@@ -37,7 +38,38 @@ function safeFailure(error) {
 }
 
 function apiStatus() {
-  return activeProvider.key?.trim() ? paint("green", "ONLINE") : paint("yellow", "KEY REQUIRED");
+  return apiKey ? paint("green", "ONLINE") : paint("yellow", "KEY REQUIRED");
+}
+
+async function requestApiKeyAtStartup() {
+  if (apiKey || !input.isTTY || typeof input.setRawMode !== "function") return;
+
+  console.clear();
+  console.log(`\n${line("cyan")}\n${tag("SECURE CONNECTION SETUP", "magenta")}`);
+  console.log(paint("gray", `  Enter your ${activeProvider.name} API key. Your input will remain hidden.`));
+  console.log(paint("gray", "  It is kept only in memory for this session and is never written to disk.\n"));
+  output.write(paint("cyan", "  API key > "));
+
+  apiKey = await new Promise((resolve) => {
+    let enteredKey = "";
+    const finish = (value) => {
+      input.off("data", onData);
+      input.setRawMode(false);
+      output.write("\n");
+      resolve(value.trim());
+    };
+    const onData = (chunk) => {
+      for (const character of chunk.toString("utf8")) {
+        if (character === "\u0003") { finish(""); return; }
+        if (character === "\r" || character === "\n") { finish(enteredKey); return; }
+        if (character === "\b" || character === "\x7f") enteredKey = enteredKey.slice(0, -1);
+        else if (character >= " ") enteredKey += character;
+      }
+    };
+    input.setRawMode(true);
+    input.resume();
+    input.on("data", onData);
+  });
 }
 
 function banner() {
@@ -81,13 +113,10 @@ ${line("blue")}\n`);
 }
 
 async function askAI(question) {
-  const apiKey = activeProvider.key?.trim();
   if (!apiKey) {
     console.log(`\n${tag("CONNECTION NOTICE", "yellow")}`);
-    const keyName = provider === "openai" ? "OPENAI_API_KEY" : "OPENROUTER_API_KEY";
-    console.log(paint("yellow", `  No ${keyName} was detected.`));
-    console.log(paint("gray", "  PowerShell: ") + `$env:${keyName} = 'your-key-here'`);
-    console.log(paint("gray", "  Restart Code Terminal after setting it.\n"));
+    console.log(paint("yellow", "  No API key was entered during secure setup."));
+    console.log(paint("gray", "  Restart Code Terminal to enter it.\n"));
     return;
   }
 
@@ -131,6 +160,7 @@ async function askAI(question) {
 }
 
 async function run() {
+  await requestApiKeyAtStartup();
   banner();
   const rl = readline.createInterface({ input, output, terminal: true });
   rl.on("SIGINT", () => rl.close());

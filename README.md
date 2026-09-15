@@ -4,10 +4,11 @@ An AI-powered developer console with a terminal-first interface.
 
 ## Start with OpenRouter
 
-Requires Node.js 18 or newer. Code Terminal uses OpenRouter by default:
+Requires Node.js 18 or newer. Code Terminal uses OpenRouter by default and
+securely prompts for the API key when it starts. The key is hidden while typing
+and stays only in memory for that session:
 
 ```powershell
-$env:OPENROUTER_API_KEY = "your-openrouter-api-key"
 npm start
 ```
 
@@ -23,7 +24,6 @@ npm start
 
 ```powershell
 $env:CODE_TERMINAL_PROVIDER = "openai"
-$env:OPENAI_API_KEY = "your-openai-api-key"
 npm start
 ```
 
@@ -44,6 +44,7 @@ from any directory with `code-terminal`.
 ## Security
 
 Keep API keys out of source code, prompts, screenshots, and Git. Code Terminal
-only reads them from process environment variables and never displays them. See
+prompts for them with hidden input and never displays or writes them. Existing
+environment variables remain an optional convenience fallback. See
 [SECURITY.md](SECURITY.md) for the client protections and the recommended
 server-side relay design for production use.
